@@ -19,7 +19,7 @@ def analyze(args):
     model = HookedTransformer.from_pretrained(
         args.model, 
         device="cpu",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
     
     # Move model to the specified device
@@ -74,34 +74,22 @@ def analyze(args):
     neutral_tokens = model.tokenizer.encode(neutral_text)[:300000]
     
     # 4. Get Feature Statistics
-    def get_feature_stats(tokens, batch_size=2):
+    def get_feature_stats(tokens):
         """Compute mean activation and sparsity for each feature."""
         feature_acts_sum = torch.zeros(sae.d_sae, device=device)
         feature_active_count = torch.zeros(sae.d_sae, device=device)
         total_tokens = 0
         
-        seq_len = 512
-        token_chunks = [tokens[i:i+seq_len] for i in range(0, len(tokens), seq_len)]
+        tokens_tensor = torch.tensor(tokens, device=device).unsqueeze(0)
         
-        clean_batches = []
-        for i in range(0, len(token_chunks), batch_size):
-            batch = token_chunks[i:i+batch_size]
-            if len(batch) > 0:
-                try:
-                    # Pad the last batch if necessary
-                    max_len = max(len(c) for c in batch)
-                    padded_batch = [c + [model.tokenizer.pad_token_id or 0] * (max_len - len(c)) for c in batch]
-                    tensor_batch = torch.tensor(padded_batch).to(device)
-                    if tensor_batch.ndim == 1:
-                        tensor_batch = tensor_batch.unsqueeze(0)
-                    clean_batches.append(tensor_batch)
-                except:
-                    pass
-        
-        print(f"Processing {len(clean_batches)} batches...")
-        with torch.no_grad():
-            for batch in tqdm(clean_batches):
-                _, cache = model.run_with_cache(batch, stop_at_layer=args.layer + 1)
+        print(f"Processing {tokens_tensor.shape[1]} tokens in chunks of 256...")
+        for i in tqdm(range(0, tokens_tensor.shape[1], 256)):
+            chunk = tokens_tensor[:, i : i + 256]
+            if chunk.shape[1] == 0:
+                continue
+                
+            with torch.no_grad():
+                _, cache = model.run_with_cache(chunk, stop_at_layer=args.layer + 1)
                 acts = cache[f"blocks.{args.layer}.hook_resid_post"]
                 features = sae.encode(acts)
                 
@@ -110,6 +98,7 @@ def analyze(args):
                 feature_active_count += (features > 0).float().sum(dim=0)
                 total_tokens += features.shape[0]
                 
+                del cache
                 torch.cuda.empty_cache()
                 
         mean_activation = feature_acts_sum / total_tokens
