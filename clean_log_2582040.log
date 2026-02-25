@@ -1,0 +1,97 @@
+==========================================
+SLURM_JOB_ID = 2582040
+SLURM_NODELIST = gnode061
+SLURM_JOB_GPUS = 1
+==========================================
+Starting Phase 1...
+Reading /home2/manas.agrawal/INLP_PROJECT/Harry_Potter_all_books_preprocessed.txt...
+Could not find Book 4 start. Using length heuristic (1.6M chars).
+Saved processed text to /home2/manas.agrawal/INLP_PROJECT/src/data/target_corpus.txt. Length: 1600000 chars.
+Loading neutral corpus (wikitext-2)...
+Starting Phase 2...
+WARNING:root:float16 models may not work on CPU. Consider using a GPU or bfloat16.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Using device: cuda
+Loading gemma-2b on CPU first to save memory...
+WARNING:root:With reduced precision, it is advised to use `from_pretrained_no_processing` instead of `from_pretrained`.
+WARNING:root:You are not using LayerNorm, so the writing weights can't be centered! Skipping
+Loaded pretrained model gemma-2b into HookedTransformer
+Moving model to CUDA...
+Moving model to device:  cuda
+Using GPU: NVIDIA GeForce RTX 2080 Ti
+Total GPU Memory: 11.35 GB
+Loading Data...
+Using NEUTRAL corpus (OpenWebText) for SAE training...
+This learns general features that can later be compared to HP corpus.
+Collecting 5000000 tokens from OpenWebText...
+Collected 5000000 tokens
+Initializing TopK SAE for Layer 12 with d_sae=32768, k=32...
+Starting training...
+Moving model to device:  cuda
+Saved SAE to checkpoints/sae_gemma-2b_layer_12.pt
+Starting Phase 3...
+WARNING:root:float16 models may not work on CPU. Consider using a GPU or bfloat16.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading gemma-2b on CPU first to save memory...
+WARNING:root:With reduced precision, it is advised to use `from_pretrained_no_processing` instead of `from_pretrained`.
+WARNING:root:You are not using LayerNorm, so the writing weights can't be centered! Skipping
+Token indices sequence length is longer than the specified maximum sequence length for this model (353631 > 1024). Running this sequence through the model will result in indexing errors
+Loaded pretrained model gemma-2b into HookedTransformer
+Moving model to CUDA...
+Moving model to device:  cuda
+Using GPU: NVIDIA GeForce RTX 2080 Ti
+Total GPU Memory: 11.35 GB
+Loading SAE for Layer 12...
+Loading Target Corpus (Harry Potter)...
+Loading and tokenizing src/data/target_corpus.txt using gpt2 tokenizer...
+Loaded 353631 tokens.
+Loading Neutral Corpus (WikiText)...
+Loading neutral corpus (wikitext-2)...
+Computing Target Feature Statistics...
+Processing 300000 tokens in chunks of 256...
+Computing Neutral Feature Statistics...
+Processing 137695 tokens in chunks of 256...
+
+Using SPARSITY-based feature selection (retain_threshold=0.01)
+
+Top Features (sparsity-based):
+Feature    Target Sparsity    Neutral Sparsity  
+----------------------------------------------
+19         0.000000         0.000000
+18         0.000000         0.000000
+16         0.000000         0.000000
+17         0.000000         0.000000
+1          0.000000         0.000000
+0          0.000000         0.000000
+2          0.000000         0.000000
+3          0.000000         0.000000
+11         0.000000         0.000000
+10         0.000000         0.000000
+8          0.000000         0.000000
+9          0.000000         0.000000
+13         0.000000         0.000000
+12         0.000000         0.000000
+14         0.000000         0.000000
+15         0.000000         0.000000
+7          0.000000         0.000000
+6          0.000000         0.000000
+4          0.000000         0.000000
+5          0.000000         0.000000
+
+Saved selected features to results/gemma-2b_layer_12_features.pt
+Starting Phase 4...
+WARNING:root:float16 models may not work on CPU. Consider using a GPU or bfloat16.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading Model: gemma-2b on CPU first to save memory...
+WARNING:root:With reduced precision, it is advised to use `from_pretrained_no_processing` instead of `from_pretrained`.
+WARNING:root:You are not using LayerNorm, so the writing weights can't be centered! Skipping
+Loaded pretrained model gemma-2b into HookedTransformer
+Moving model to CUDA...
+Moving model to device:  cuda
+Using GPU: NVIDIA GeForce RTX 2080 Ti
+Total GPU Memory: 11.35 GB
+Evaluating Baseline...
+Evaluating 50 prompts...
+Baseline Match Rate: 0.3400
+Loading SAE for Layer 12...
+Warning: Features file results/layer_12_features.pt not found. No ablation unless manually specified.
