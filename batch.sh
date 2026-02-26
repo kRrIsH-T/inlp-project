@@ -9,13 +9,16 @@
 #SBATCH --output=inlp_unlearn_%j.log
 #SBATCH --mail-type=END
 #SBATCH --mail-user=manas.agrawal@research.iiit.ac.in
+#SBATCH -p u22
+#SBATCH --constraint=2080ti
+#SBATCH --gres=gpu:1
 
 # 1. Setup environment
 module load u22/python/3.12.4
 module load u22/cuda/12.1
 
 # Use the exact path from your pwd command
-source /home2/manas.agrawal/INLP_PROJECT/inlp_env/bin/activate
+source /home2/manas.agrawal/INLP_PROJECT/inlp/bin/activate
 
 # Function to send progress emails manually
 send_update() {
@@ -27,17 +30,14 @@ send_update "Starting the job:"
 # Phase 1: Preprocessing
 echo "Starting Phase 1..."
 python src/data/preprocess.py
-send_update "Phase 1 (Preprocessing) Completed"
 
 # Phase 2: SAE Training
 echo "Starting Phase 2..."
 python src/sae/train.py --model gemma-2b --layer 12 --use_neutral_corpus
-send_update "Phase 2 (SAE Training) Completed"
 
 # Phase 3: Feature Identification
-echo "Starting Phase 4..."
+echo "Starting Phase 3..."
 python src/analysis/diff_means.py --model gemma-2b --layer 12 --method sparsity
-send_update "Phase 3 (Feature Identification) Completed"
 
 # Phase 4: Evaluation
 echo "Starting Phase 4..."
