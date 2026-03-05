@@ -60,9 +60,8 @@ def load_and_tokenize(file_path, model_name="gpt2"):
     return tokens
 
 if __name__ == "__main__":
-    input_file = "/home/jay/inlp/Harry_Potter_all_books_preprocessed.txt"
-    output_file = "/home/jay/inlp/src/data/target_corpus.txt"
-    
+    input_file = "Harry_Potter_all_books_preprocessed.txt"
+    output_file = "src/data/target_corpus.txt"
     # Ensure directory exists
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     

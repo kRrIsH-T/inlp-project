@@ -1,47 +1,52 @@
 import torch
 from jaxtyping import Float
 
-def get_ablation_hook(sae, feature_indices_to_ablate):
+def get_ablation_hook(sae, feature_indices_to_ablate, mean_activations=None, scale=-5.0):
     """
     Returns a hook function that ablates specific features using the SAE.
+    
+    This uses CONDITIONAL NEGATIVE SCALING: if a targeted feature fires,
+    we explicitly invert and amplify its activation (e.g., scale * z_sparse).
+    This actively suppresses the feature's contribution ONLY on tokens 
+    where it tries to activate, preserving general capabilities (perplexity)
+    unlike unconditional steering.
+    
+    Args:
+        sae: The trained Sparse Autoencoder
+        feature_indices_to_ablate: Tensor of feature indices to ablate
+        mean_activations: (Unused in this updated method, kept for signature compatibility)
+        scale: Scaling factor. 0.0 means standard zero-ablation. 
+               -5.0 means conditional negative steering.
     """
     def hook(activation: Float[torch.Tensor, "batch seq d_model"], hook):
         # Activation shape: [batch, seq, d_model]
-        
-        # 1. Encode
-        # SAE expects [batch, d_model] usually, but handled batch/seq flattening in training?
-        # My TopKSAE implementation takes [..., d_in] and returns [..., d_out].
-        # It handles arbitrary leading dimensions if implemented with standard linear layers.
-        # Let's check model.py:
-        # encode(x): (x - b_dec) @ W_enc + b_enc. Yes, handles B, S.
-        
-        # We need to clone activation to avoid in-place errors if needed, but usually fine.
         original_act = activation.clone()
         
+        # 1. Full forward pass through SAE
         x_reconstruct, z_sparse = sae(activation)
         
         # 2. Ablate
-        # z_sparse: [batch, seq, d_sae] (after TopK and scatter)
-        # We want to ZERO out the features in z_sparse that correspond to Harry Potter.
-        
-        # Create a mask or just zero them out
-        # feature_indices_to_ablate is a list or tensor of indices.
-        
         z_ablated = z_sparse.clone()
-        z_ablated[:, :, feature_indices_to_ablate] = 0.0
         
-        # 3. Decode
-        # We need to use the DECODER of the SAE to get the ablated reconstruction.
-        # x_ablated_recon = z_ablated @ W_dec + b_dec
+        if scale == 0.0:
+            # Standard zero ablation
+            z_ablated[..., feature_indices_to_ablate] = 0.0
+        else:
+            # Conditional negative scaling
+            # Only modify tokens where the feature actually fired
+            target_acts = z_sparse[..., feature_indices_to_ablate]
+            fired_mask = target_acts > 0
+            
+            z_ablated[..., feature_indices_to_ablate] = torch.where(
+                fired_mask,
+                target_acts * scale,
+                0.0
+            )
+        
+        # 3. Decode the ablated activations
         x_ablated_recon = z_ablated @ sae.W_dec + sae.b_dec
         
-        # 4. Reconstruction Error
-        # We want to preserve the information that the SAE *didn't* capture.
-        # error = original_act - x_reconstruct
-        # new_act = x_ablated_recon + error
-        # This is equivalent to: original_act - (x_reconstruct - x_ablated_recon)
-        # i.e. removing the contribution of the specific features.
-        
+        # 4. Preserve the SAE reconstruction error
         error = original_act - x_reconstruct
         modified_act = x_ablated_recon + error
         

@@ -1,0 +1,26 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Machine Learning Artifacts
+checkpoints/
+results/*.pt
+# results/*.json  # Uncomment if you want to keep results JSONs but they can be large if they contain many samples
+
+# # Large Datasets & Supplementary Material
+# Harry_Potter_all_books_preprocessed.txt
+# src/data/*.txt
+# *.pdf
+# 8940_Who_s_Harry_Potter_Approx_Supplementary\ Material/
+# "who is harry potter.pdf"
+# "TerminalTouchers-Outline.pdf"
+
+# IDE Settings
+.vscode/
+.idea/
