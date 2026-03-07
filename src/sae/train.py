@@ -14,8 +14,8 @@ def main(args):
     print(f"Using device: {device}")
 
     # 1. Load Model
-    print("Loading GPT-2 Small...")
-    model = HookedTransformer.from_pretrained("gpt2-small", device=device)
+    print(f"Loading {args.model_name}...")
+    model = HookedTransformer.from_pretrained(args.model_name, device=device)
     
     # 2. Load Data — SAE should be trained on GENERAL data, not just target corpus
     # This is critical: the SAE learns a general-purpose feature dictionary.
@@ -92,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
+    parser.add_argument("--model_name", type=str, default="gpt2-medium", help="Model name to load")
     parser.add_argument("--expansion_factor", type=int, default=16, help="Expansion factor for SAE")
     parser.add_argument("--k", type=int, default=32, help="TopK sparsity")
     

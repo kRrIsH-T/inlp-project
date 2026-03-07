@@ -13,8 +13,8 @@ def analyze(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # 1. Load Model
-    print("Loading Model...")
-    model = HookedTransformer.from_pretrained("gpt2-small", device=device)
+    print(f"Loading {args.model_name}...")
+    model = HookedTransformer.from_pretrained(args.model_name, device=device)
     
     # 2. Load SAE
     print(f"Loading SAE for Layer {args.layer}...")
@@ -27,7 +27,7 @@ def analyze(args):
         print(f"Error: Checkpoint {checkpoint_path} not found.")
         return
         
-    sae.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    sae.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     sae.to(device)
     sae.eval()
     
@@ -36,9 +36,9 @@ def analyze(args):
     target_tokens = load_and_tokenize(args.target_corpus)
     target_tokens = target_tokens[:args.max_tokens]
     
-    print("Loading Neutral Corpus (WikiText-2)...")
-    neutral_dataset = get_neutral_corpus(split="train")
-    neutral_text = "\n".join([t for t in neutral_dataset["text"][:3000] if t.strip()])
+    print("Loading Neutral Corpus (Wiki + Fiction)...")
+    neutral_list = get_neutral_corpus(split="train")
+    neutral_text = "\n".join(neutral_list[:4000]) # Take more samples for broader coverage
     neutral_tokens = model.tokenizer.encode(neutral_text)[:args.max_tokens]
     
     # 4. Compute Feature Activation Statistics
@@ -102,28 +102,53 @@ def analyze(args):
     print("\nComputing Neutral Feature Statistics...")
     neutral_freq, neutral_mean_act, neutral_count = get_feature_stats(neutral_tokens)
     
-    # 5. Difference in Means (using ACTIVATION FREQUENCY as primary metric)
-    freq_diff = target_freq - neutral_freq
+    # 5. Feature Metrics calculation
+    # Compute Specificity Ratio: how much more likely is it to fire on target?
+    # Use a small epsilon to avoid div by zero
+    specificity_ratio = target_freq / (neutral_freq + 1e-6)
     
-    # Filter: only consider features that actually fire on target corpus
-    min_freq = args.min_freq
-    valid_mask = target_freq > min_freq
-    freq_diff_masked = freq_diff.clone()
-    freq_diff_masked[~valid_mask] = -float('inf')
+    # Filter: avoid syntactic/common features that fire too often in general
+    # Generic features break the model's grammar if ablated.
+    # Stricter neutral_freq filter for high expansion SAEs
+    max_neutral_freq = args.max_neutral_freq
+    max_freq = args.max_freq
+    
+    # valid_mask requires minimum frequency on target and maximum on neutral
+    # PLUS a minimum specificity ratio
+    valid_mask = (target_freq > args.min_freq) & \
+                 (neutral_freq < max_neutral_freq) & \
+                 (target_freq < max_freq) & \
+                 (specificity_ratio > args.min_ratio)
+    
+    # Metric: freq_diff is good, but let's also weight by specificity
+    # We want features that are BOTH high-diff AND high-ratio
+    freq_diff = target_freq - neutral_freq
+    score = freq_diff * torch.log1p(specificity_ratio)
+    
+    # Sort selection
+    if args.sort_by == "ratio":
+        selection_metric = specificity_ratio.clone()
+    elif args.sort_by == "score":
+        selection_metric = score.clone()
+    else:
+        selection_metric = freq_diff.clone()
+    
+    selection_metric[~valid_mask] = -float('inf')
     
     # 6. Select Top Features
-    top_vals, top_inds = torch.topk(freq_diff_masked, k=args.num_features)
+    top_vals, top_inds = torch.topk(selection_metric, k=args.num_features)
     
     print(f"\n{'='*70}")
-    print(f"Top {args.num_features} Harry Potter-specific features (by activation frequency difference):")
-    print(f"{'='*70}")
-    print(f"{'Feature':>10} | {'Target Freq':>12} | {'Neutral Freq':>12} | {'Freq Diff':>10} | {'Mean Act':>10}")
-    print(f"{'-'*10}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}-+-{'-'*10}")
-    
+    print(f"Top {args.num_features} Harry Potter-specific features (by score):")
+    print(f"{'Index':>10} | {'Score':>10} | {'Target Freq':>12} | {'Neut Freq':>12} | {'Ratio':>10}")
+    print("-" * 70)
     for i in range(args.num_features):
         idx = top_inds[i].item()
-        print(f"{idx:>10} | {target_freq[idx].item():>12.4f} | {neutral_freq[idx].item():>12.4f} | "
-              f"{freq_diff[idx].item():>10.4f} | {target_mean_act[idx].item():>10.4f}")
+        val = top_vals[i].item()
+        t_f = target_freq[idx].item()
+        n_f = neutral_freq[idx].item()
+        ratio = specificity_ratio[idx].item()
+        print(f"{idx:10} | {val:10.4f} | {t_f:12.4f} | {n_f:12.4f} | {ratio:10.1f}")
         
     # 7. Save results (indices, frequency data, and mean activations for ablation)
     save_path = f"results/layer_{args.layer}_features.pt"
@@ -140,12 +165,18 @@ def analyze(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layer", type=int, default=8)
+    parser.add_argument("--layer", type=int, default=12)
+    parser.add_argument("--model_name", type=str, default="gpt2-medium", help="Model name to load")
     parser.add_argument("--target_corpus", type=str, default="src/data/target_corpus.txt")
     parser.add_argument("--expansion_factor", type=int, default=16)
     parser.add_argument("--k", type=int, default=32)
     parser.add_argument("--num_features", type=int, default=20)
+    parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--max_tokens", type=int, default=300000, help="Max tokens from each corpus")
     parser.add_argument("--min_freq", type=float, default=0.001, help="Min activation frequency on target")
+    parser.add_argument("--max_neutral_freq", type=float, default=0.005, help="Max activation frequency on neutral corpus")
+    parser.add_argument("--max_freq", type=float, default=0.2, help="Max activation frequency overall")
+    parser.add_argument("--min_ratio", type=float, default=20.0, help="Minimum specificity ratio (target/neutral)")
+    parser.add_argument("--sort_by", type=str, choices=["ratio", "score", "diff"], default="ratio")
     args = parser.parse_args()
     analyze(args)

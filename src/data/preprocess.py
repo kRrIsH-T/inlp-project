@@ -17,24 +17,7 @@ def clean_text(input_path, output_path):
     # Avg word length 5 chars + 1 space = 6.
     # 270k * 6 = 1.62M chars.
     # Let's be generous and take 1.8M chars to be safe, or just cut by book if possible.
-    # Searching for "Harry Potter and the Goblet of Fire" (Book 4) title might work.
-    
-    # Book 4 Start: "Harry Potter and the Goblet of Fire"
-    # Note: The text seems to be stripped of some formatting. 
-    # Let's try to find "THE VILLAGE OF LITTLE HANGLETON" (Chapter 1 of Book 4).
-    # Or just "The Riddle House".
-    
-    book4_start = full_text.find("THE VILLAGE OF LITTLE HANGLETON")
-    if book4_start == -1:
-        # Try finding Book 4 title
-        book4_start = full_text.find("Harry Potter and the Goblet of Fire")
-    
-    if book4_start != -1:
-        print(f"Found Book 4 start at index {book4_start}. Truncating there.")
-        target_text = full_text[:book4_start]
-    else:
-        print("Could not find Book 4 start. Using length heuristic (1.6M chars).")
-        target_text = full_text[:1600000] # Fallback
+    target_text = full_text
     
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(target_text)
@@ -42,11 +25,24 @@ def clean_text(input_path, output_path):
     print(f"Saved processed text to {output_path}. Length: {len(target_text)} chars.")
     return target_text
 
-def get_neutral_corpus(split="train", num_samples=1000):
+def get_neutral_corpus(split="train"):
     # Load a subset of Wikitext-2
     print("Loading neutral corpus (wikitext-2)...")
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
-    return dataset
+    wiki_text = [t for t in dataset["text"] if t.strip()]
+    
+    # Add a fictional component to broaden the baseline (GPT-2 medium is mostly web/wiki)
+    print("Loading fictional neutral corpus (TinyStories)...")
+    try:
+        fiction_ds = datasets.load_dataset("roneneldan/TinyStories", split="train", streaming=True)
+        fiction_text = []
+        it = iter(fiction_ds)
+        for _ in range(2000): # Take 2000 samples
+            fiction_text.append(next(it)["text"])
+        return wiki_text + fiction_text
+    except Exception as e:
+        print(f"Warning: Could not load TinyStories ({e}). Falling back to WikiText-2 only.")
+        return wiki_text
 
 def load_and_tokenize(file_path, model_name="gpt2"):
     print(f"Loading and tokenizing {file_path}...")

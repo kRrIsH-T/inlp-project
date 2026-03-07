@@ -24,3 +24,8 @@ results/*.pt
 # IDE Settings
 .vscode/
 .idea/
+
+# Local Environment & Data
+.env
+.venv_openai/
+data/
