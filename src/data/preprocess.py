@@ -4,62 +4,113 @@ import datasets
 from transformers import GPT2Tokenizer
 
 def clean_text(input_path, output_path):
-    """
-    Reads the input file and saves the cleaned text (first ~3 books).
-    """
     print(f"Reading {input_path}...")
     with open(input_path, 'r', encoding='utf-8') as f:
         full_text = f.read()
-    
-    # The file seems to be preprocessed (no newlines?), or maybe it has them.
-    # We'll just take the first portion.
-    # Estimate: Book 1-3 is approx 270k words.
-    # Avg word length 5 chars + 1 space = 6.
-    # 270k * 6 = 1.62M chars.
-    # Let's be generous and take 1.8M chars to be safe, or just cut by book if possible.
+
     target_text = full_text
-    
+
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(target_text)
-        
+
     print(f"Saved processed text to {output_path}. Length: {len(target_text)} chars.")
     return target_text
 
-def get_neutral_corpus(split="train"):
-    # Load a subset of Wikitext-2
-    print("Loading neutral corpus (wikitext-2)...")
+
+def count_tokens(text_list, tokenizer):
+    total_tokens = 0
+    for t in text_list:
+        total_tokens += len(tokenizer.encode(t))
+    return total_tokens
+
+
+def print_table(rows, headers):
+    col_widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows)]
+
+    def format_row(row):
+        return " | ".join(str(x).ljust(w) for x, w in zip(row, col_widths))
+
+    print("\n" + format_row(headers))
+    print("-+-".join("-"*w for w in col_widths))
+
+    for r in rows:
+        print(format_row(r))
+    print()
+
+
+def get_neutral_corpus(split="train", model_name="gpt2"):
+
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
+    print("Loading WikiText-2...")
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     wiki_text = [t for t in dataset["text"] if t.strip()]
-    
-    # Add a fictional component to broaden the baseline (GPT-2 medium is mostly web/wiki)
-    print("Loading fictional neutral corpus (TinyStories)...")
+
+    print("Loading TinyStories...")
+    fiction_text = []
     try:
-        fiction_ds = datasets.load_dataset("roneneldan/TinyStories", split="train", streaming=True)
-        fiction_text = []
+        fiction_ds = datasets.load_dataset(
+            "roneneldan/TinyStories",
+            split="train",
+            streaming=True
+        )
+
         it = iter(fiction_ds)
-        for _ in range(2000): # Take 2000 samples
+        for _ in range(2000):
             fiction_text.append(next(it)["text"])
-        return wiki_text + fiction_text
+
     except Exception as e:
-        print(f"Warning: Could not load TinyStories ({e}). Falling back to WikiText-2 only.")
-        return wiki_text
+        print(f"Warning: TinyStories failed ({e})")
+
+    print("Counting tokens...")
+
+    wiki_tokens = count_tokens(wiki_text, tokenizer)
+    fiction_tokens = count_tokens(fiction_text, tokenizer)
+
+    total = wiki_tokens + fiction_tokens
+
+    ratio_wiki = wiki_tokens / total if total > 0 else 0
+    ratio_fiction = fiction_tokens / total if total > 0 else 0
+
+    rows = [
+        ["WikiText-2", len(wiki_text), wiki_tokens, f"{ratio_wiki:.3f}"],
+        ["TinyStories", len(fiction_text), fiction_tokens, f"{ratio_fiction:.3f}"],
+        ["Total", len(wiki_text)+len(fiction_text), total, "1.000"]
+    ]
+
+    print_table(
+        rows,
+        headers=["Dataset", "Documents", "Tokens", "Sampling Ratio"]
+    )
+
+    return wiki_text + fiction_text
+
 
 def load_and_tokenize(file_path, model_name="gpt2"):
     print(f"Loading and tokenizing {file_path}...")
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
-    # Tokenize
-    # This might be slow for large files without chunking, but for 1.6MB it should be fine.
+
     tokens = tokenizer.encode(text)
-    print(f"Loaded {len(tokens)} tokens.")
+
+    rows = [["Target Corpus", len(tokens)]]
+
+    print_table(rows, headers=["Corpus", "Tokens"])
+
     return tokens
 
+
 if __name__ == "__main__":
+
     input_file = "Harry_Potter_all_books_preprocessed.txt"
     output_file = "src/data/target_corpus.txt"
-    # Ensure directory exists
+
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
+
     clean_text(input_file, output_file)
-    get_neutral_corpus() # Just to verify it loads
+
+    load_and_tokenize(output_file)
+
+    get_neutral_corpus()
