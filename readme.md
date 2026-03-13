@@ -1,79 +1,220 @@
-# INLP Project: Unlearning Harry Potter
+# Knowledge Unlearning in Language Models using Sparse Autoencoders
 
-This project implements a pipeline for unlearning specific knowledge (e.g., Harry Potter universe) from large language models like Gemma 2B using Sparse Autoencoders (SAEs).
+Course Project for *Introduction to Natural Language Processing (INLP)*, IIIT Hyderabad
 
-## Workflow Overview
+## Table of Contents
 
-The unlearning pipeline consists of four main phases:
-1. **Preprocessing**: Prepare the target corpus and neutral data.
-2. **SAE Training**: Train a Sparse Autoencoder on a neutral corpus.
-3. **Feature Identification**: Identify features associated with the target knowledge.
-4. **Evaluation**: Intervene on the model and measure unlearning success.
+- [Project Overview](#project-overview)
+- [Running the Project](#running-the-project)
+  - [Installation](#installation)
+  - [Workflow](#workflow)
+- [Methodology](#methodology)
+  - [Data Preparation](#data-preparation)
+  - [Sparse Autoencoder Training](#sparse-autoencoder-training)
+  - [Feature Identification](#feature-identification)
+  - [Intervention](#intervention)
+- [Evaluation](#evaluation)
+- [Results](#results)
+- [Repository Structure](#repository-structure)
+- [Team](#team)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
-## Installation
+## Project Overview
+
+This project investigates selective knowledge removal in large language models through mechanistic interpretability techniques. The goal is to remove knowledge associated with the *Harry Potter* domain from a pretrained GPT-2 Medium model while preserving the model’s general linguistic and reasoning capabilities.
+
+Traditional approaches to model editing rely on gradient-based fine-tuning or parameter modification, which may introduce unintended side effects or degrade general performance. In contrast, this work employs **Sparse Autoencoders (SAEs)** trained on internal transformer activations to identify interpretable features corresponding to specific knowledge domains. By selectively ablating these features during inference, it becomes possible to remove targeted knowledge in a controlled and interpretable manner.
+
+The approach focuses on identifying high-level features in the residual stream of the transformer that are strongly associated with Harry Potter concepts. These features are then suppressed at inference time using forward hooks, allowing the model to generate responses without relying on the removed knowledge.
+
+---
+
+## Running the Project
+
+### Installation
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/Gopalkataria/INLP_PROJECT.git
+cd INLP_PROJECT
+
+pip install torch transformer-lens datasets tqdm einops transformers
 ```
 
-## Phase 1: Preprocessing
+### Workflow
 
-Prepare the Harry Potter target corpus by extracting and cleaning the text.
+1. **Data Preprocessing**
+
+Preprocess the Harry Potter corpus and prepare the neutral datasets.
 
 ```bash
 python src/data/preprocess.py
 ```
-This script creates `src/data/target_corpus.txt` by processing the raw book data.
 
-## Phase 2: SAE Training
+2. **Train Sparse Autoencoder**
 
-Train a TopK Sparse Autoencoder (SAE) on a neutral corpus (OpenWebText) to learn general language features.
-
-```bash
-python src/sae/train.py --model gemma-2b --layer 12 --use_neutral_corpus
-```
-
-**Key Arguments:**
-- `--model`: `gpt2-small`, `gpt2-medium`, `gemma-2b`, or `gemma-2-2b`.
-- `--layer`: The transformer layer to attach the SAE to (e.g., 12 for Gemma).
-- `--use_neutral_corpus`: (Recommended) Ensures the SAE learns general features.
-- `--num_tokens`: Number of tokens to train on (default: 5,000,000).
-
-## Phase 3: Feature Identification
-
-Identify the specific SAE features that correspond to Harry Potter knowledge by comparing activations on the target vs. neutral corpora.
+Train a Top-K Sparse Autoencoder on the residual stream of GPT-2 Medium.
 
 ```bash
-python src/analysis/diff_means.py --model gemma-2b --layer 12 --method sparsity
+python src/sae/train.py --model_name gpt2-medium --layer 12 --k 32 --expansion_factor 16 --epochs 20
 ```
 
-**Key Arguments:**
-- `--method`: `sparsity` (recommended) or `diff_means`.
-- `--num_features`: Number of top features to select (default: 20).
-- Results are saved to `results/gemma-2b_layer_12_features.pt`.
+3. **Feature Analysis**
 
-## Phase 4: Evaluation
-
-Evaluate the model's ability to answer Harry Potter prompts while ablating the identified features.
+Identify candidate features associated with Harry Potter knowledge using a difference-in-means analysis between the target and neutral corpora.
 
 ```bash
-python src/eval/evaluate.py --model gemma-2b --layer 12 --limit 50
+python src/analysis/diff_means.py --model_name gpt2-medium --layer 12 --num_features 100 --min_ratio 50.0 --sort_by ratio
 ```
 
-**Key Arguments:**
-- `--limit`: Number of prompts to evaluate (for speed).
-- `--clamp_value`: The negative value used for ablation (default: -20.0).
-- This script compares the baseline completion rate vs. the ablated completion rate.
+4. **Evaluation**
+
+Evaluate the impact of ablating the discovered features on Harry Potter knowledge recall and general language modeling performance.
+
+```bash
+python src/eval/unified_evaluate.py --layer 12 --num_features 100 --ablation_scale -3.0 --freq_penalty 1.0 --top_p 0.9
+```
+
+5. **LLM-based Evaluation (Optional)**
+
+Run qualitative classification of generated completions using an external language model.
+
+```bash
+python src/eval/evaluate_llm_judge.py --model Qwen/Qwen2.5-7B-Instruct
+```
+
+This step requires setting an `HF_TOKEN` environment variable for Hugging Face inference.
+
+
 
 ---
 
-## Project Structure
+## Methodology
 
-- `src/sae/`: SAE model and training logic.
-- `src/data/`: Data loading and preprocessing.
-- `src/analysis/`: Scripts to identify knowledge-specific features.
-- `src/eval/`: Evaluation scripts for unlearning and perplexity.
-- `src/intervention/`: Hooks for model intervention and feature ablation.
-- `8940_Who_s_Harry_Potter_Approx_Supplementary Material/`: Evaluation prompts and data.
+### Data Preparation
+
+Two types of corpora are used during analysis.
+
+**Target Corpus**
+
+The Harry Potter book series is processed and tokenized to produce sequences containing dense domain-specific knowledge.
+
+**Neutral Corpus**
+
+A combination of WikiText-2 and TinyStories is used as a baseline dataset. The inclusion of general fiction prevents the sparse autoencoder from incorrectly identifying common fantasy terminology such as “wand” or “spell” as uniquely Harry Potter related.
+
+---
+
+### Sparse Autoencoder Training
+
+Sparse autoencoders are trained on the **residual stream activations of GPT-2 Medium at layer 12**. The autoencoder learns a sparse representation of activations using a Top-K activation constraint.
+
+The goal of this representation is to decompose the residual stream into interpretable features that correspond to meaningful semantic patterns in the model’s internal computations.
+
+---
+
+### Feature Identification
+
+Candidate features associated with Harry Potter knowledge are identified using a **difference-in-means analysis**.
+
+For each SAE feature:
+
+1. Activation statistics are computed on the Harry Potter corpus.
+2. Activation statistics are computed on the neutral corpus.
+3. A specificity ratio is calculated.
+
+Features with significantly higher activation on the target corpus are considered domain-specific.
+
+---
+
+### Intervention
+
+Feature ablation is implemented using forward hooks through the **TransformerLens** framework.
+
+Selected SAE features are suppressed during the forward pass using a negative scaling factor. This intervention prevents the model from utilizing those features when generating text.
+
+---
+
+## Evaluation
+
+Evaluation focuses on two objectives:
+
+1. Measuring how effectively the model forgets Harry Potter knowledge.
+2. Ensuring that the model’s general capabilities remain intact.
+
+The following metrics are used.
+
+**Knowledge Recall**
+
+Completion accuracy on prompts referencing Harry Potter entities and events.
+
+**Log-Probability Analysis**
+
+Log probabilities assigned to tokens from different semantic domains.
+
+**General Language Modeling**
+
+Perplexity on WikiText-2 to measure overall language modeling performance.
+
+**Qualitative Assessment**
+
+Generated completions are manually inspected and optionally classified by an external language model.
+
+---
+
+## Results
+
+Experiments were conducted using GPT-2 Medium with the top 100 Harry Potter-specific features identified at layer 12.
+
+
+| Metric | Baseline (Top-P) | Ablated ($-3.0$ Scale) | Impact |
+| :--- | :--- | :--- | :--- |
+| **HP Knowledge Recall** | **46.7%** (140/300) | **4.7%** (14/300) | **90.0% Reduction (Manual Judge)** |
+| **HP Log-Probability** | $-3.6567$ | $-5.1248$ | **$-1.4681$ Shift (Massive Drop)** |
+| **Magic Log-Probability** | $-3.0521$ | $-3.1354$ | **Preserved ($-0.08$)** |
+| **Fantasy Log-Probability**| $-6.4321$ | $-6.8215$ | **Minor Collateral ($-0.39$)** |
+| **Real World Log-Prob** | $-3.9647$ | $-3.9692$ | **Unchanged (0.00)** |
+| **Degeneration Rate** | **0.0%** | **0.0%** | **Perfectly Stable** |
+| **WikiText-2 Perplexity** | 43.84 | 43.88 | **0.1% Degradation** |
+
+
+The ablated model typically avoids referencing Harry Potter entities and instead produces generic historical or geographical information when prompted with domain-specific queries.
+
+Detailled results can be found in project report link
+
+---
+
+## Repository Structure
+
+```
+src/
+├── sae/            # Sparse autoencoder architecture and training
+├── data/           # Dataset preprocessing and tokenization
+├── analysis/       # Feature discovery and statistical analysis
+├── intervention/   # Feature ablation hooks
+└── eval/           # Evaluation scripts and metrics
+
+results/            # JSON reports and generated completions
+readme.md           # Project documentation
+task.md             # Internal development notes
+```
+
+---
+
+## Team
+
+Jayant Gupta
+Gopal Kataria
+Manas Agrawal 
+Mohammad Akmal Ali 
+
+---
+
+## Acknowledgments
+
+Eldan, R. and Russinovich (2023). *Who’s Harry Potter? Measuring Knowledge Erasure in Language Models.*
+
+TransformerLens by Neel Nanda.
+
+Research on sparse autoencoders and mechanistic interpretability from the AI interpretability community.

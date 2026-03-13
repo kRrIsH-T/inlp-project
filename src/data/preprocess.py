@@ -11,60 +11,113 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 def clean_text(input_path, output_path):
-    """
-    Reads the input file and saves the cleaned text (first ~3 books).
-    """
     print(f"Reading {input_path}...")
     with open(input_path, 'r', encoding='utf-8') as f:
         full_text = f.read()
-    
-    # Book 4 Start: "Harry Potter and the Goblet of Fire"
-    # Try to find "THE VILLAGE OF LITTLE HANGLETON" (Chapter 1 of Book 4)
-    book4_start = full_text.find("THE VILLAGE OF LITTLE HANGLETON")
-    if book4_start == -1:
-        book4_start = full_text.find("Harry Potter and the Goblet of Fire")
-    
-    if book4_start != -1:
-        print(f"Found Book 4 start at index {book4_start}. Truncating there.")
-        target_text = full_text[:book4_start]
-    else:
-        print("Could not find Book 4 start. Using length heuristic (1.6M chars).")
-        target_text = full_text[:1600000]
-    
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
+    target_text = full_text
+
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(target_text)
-        
+
     print(f"Saved processed text to {output_path}. Length: {len(target_text)} chars.")
     return target_text
 
-def get_neutral_corpus(split="train", num_samples=1000):
-    # Load a subset of Wikitext-2
-    print("Loading neutral corpus (wikitext-2)...")
+
+def count_tokens(text_list, tokenizer):
+    total_tokens = 0
+    for t in text_list:
+        total_tokens += len(tokenizer.encode(t))
+    return total_tokens
+
+
+def print_table(rows, headers):
+    col_widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows)]
+
+    def format_row(row):
+        return " | ".join(str(x).ljust(w) for x, w in zip(row, col_widths))
+
+    print("\n" + format_row(headers))
+    print("-+-".join("-"*w for w in col_widths))
+
+    for r in rows:
+        print(format_row(r))
+    print()
+
+
+def get_neutral_corpus(split="train", model_name="gpt2"):
+
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
+    print("Loading WikiText-2...")
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
-    return dataset
+    wiki_text = [t for t in dataset["text"] if t.strip()]
+
+    print("Loading TinyStories...")
+    fiction_text = []
+    try:
+        fiction_ds = datasets.load_dataset(
+            "roneneldan/TinyStories",
+            split="train",
+            streaming=True
+        )
+
+        it = iter(fiction_ds)
+        for _ in range(2000):
+            fiction_text.append(next(it)["text"])
+
+    except Exception as e:
+        print(f"Warning: TinyStories failed ({e})")
+
+    print("Counting tokens...")
+
+    wiki_tokens = count_tokens(wiki_text, tokenizer)
+    fiction_tokens = count_tokens(fiction_text, tokenizer)
+
+    total = wiki_tokens + fiction_tokens
+
+    ratio_wiki = wiki_tokens / total if total > 0 else 0
+    ratio_fiction = fiction_tokens / total if total > 0 else 0
+
+    rows = [
+        ["WikiText-2", len(wiki_text), wiki_tokens, f"{ratio_wiki:.3f}"],
+        ["TinyStories", len(fiction_text), fiction_tokens, f"{ratio_fiction:.3f}"],
+        ["Total", len(wiki_text)+len(fiction_text), total, "1.000"]
+    ]
+
+    print_table(
+        rows,
+        headers=["Dataset", "Documents", "Tokens", "Sampling Ratio"]
+    )
+
+    return wiki_text + fiction_text
+
 
 def load_and_tokenize(file_path, model_name="gpt2"):
-    print(f"Loading and tokenizing {file_path} using {model_name} tokenizer...")
-    
-    # Handle relative paths - make them relative to project root
-    if not os.path.isabs(file_path):
-        file_path = os.path.join(PROJECT_ROOT, file_path)
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    print(f"Loading and tokenizing {file_path}...")
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
+
     tokens = tokenizer.encode(text)
-    print(f"Loaded {len(tokens)} tokens.")
+
+    rows = [["Target Corpus", len(tokens)]]
+
+    print_table(rows, headers=["Corpus", "Tokens"])
+
     return tokens
 
-if __name__ == "__main__":
-    # Use paths relative to project structure
-    input_file = os.path.join(PROJECT_ROOT, "Harry_Potter_all_books_preprocessed.txt")
-    output_file = os.path.join(SCRIPT_DIR, "target_corpus.txt")
-    
-    clean_text(input_file, output_file)
-    get_neutral_corpus()  # Just to verify it loads
 
+if __name__ == "__main__":
+
+    input_file = "Harry_Potter_all_books_preprocessed.txt"
+    output_file = "src/data/target_corpus.txt"
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    clean_text(input_file, output_file)
+
+    load_and_tokenize(output_file)
+
+    get_neutral_corpus()

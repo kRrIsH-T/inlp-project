@@ -1,167 +1,220 @@
+import os
 import sys
-import os
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-import torch
-torch.set_default_dtype(torch.float16)
-from transformer_lens import HookedTransformer
-from src.sae.model import TopKSAE
-from src.data.preprocess import load_and_tokenize, get_neutral_corpus
 import argparse
+
 import einops
-import os
+import torch
 from tqdm import tqdm
+from transformer_lens import HookedTransformer
+
+from src.data.preprocess import get_neutral_corpus, load_and_tokenize
+from src.sae.model import TopKSAE
+
 
 def analyze(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # 1. Load Model
-    print(f"Loading {args.model} on CPU first to save memory...")
-    model = HookedTransformer.from_pretrained(
-        args.model, 
-        device="cpu",
-        dtype=torch.float16,
-    )
-    
-    # Move model to the specified device
-    if device == "cuda":
-        print("Moving model to CUDA...")
-        torch.cuda.empty_cache()
-        model.to(device)
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        print(f"Total GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    
-    # 2. Load SAE
+
+    print(f"Loading {args.model_name}...")
+    model = HookedTransformer.from_pretrained(args.model_name, device=device)
     print(f"Loading SAE for Layer {args.layer}...")
-    
-    # Try new checkpoint format first, then old format
-    checkpoint_path = f"checkpoints/sae_{args.model.replace('/', '_')}_layer_{args.layer}.pt"
-    old_checkpoint_path = f"checkpoints/sae_layer_{args.layer}.pt"
-    
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            d_sae = checkpoint["d_sae"]
-            k = checkpoint["k"]
-            sae = TopKSAE(d_in=model.cfg.d_model, d_sae=d_sae, k=k)
-            sae.load_state_dict(checkpoint["state_dict"])
-        else:
-            # Old format - just state dict
-            d_model = model.cfg.d_model
-            d_sae = d_model * args.expansion_factor
-            sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k)
-            sae.load_state_dict(checkpoint)
-    elif os.path.exists(old_checkpoint_path):
-        print(f"Using old checkpoint format: {old_checkpoint_path}")
-        d_model = model.cfg.d_model
-        d_sae = d_model * args.expansion_factor
-        sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k)
-        sae.load_state_dict(torch.load(old_checkpoint_path, map_location=device))
-    else:
-        print(f"Error: No checkpoint found at {checkpoint_path} or {old_checkpoint_path}")
+    d_model = model.cfg.d_model
+    d_sae = d_model * args.expansion_factor
+    sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k)
+
+    checkpoint_path = f"checkpoints/sae_layer_{args.layer}.pt"
+    if not os.path.exists(checkpoint_path):
+        print(f"Error: Checkpoint {checkpoint_path} not found.")
         return
-        
+
+    sae.load_state_dict(
+        torch.load(checkpoint_path, map_location=device, weights_only=True)
+    )
     sae.to(device)
     sae.eval()
-    
-    # 3. Load Data
+
     print("Loading Target Corpus (Harry Potter)...")
     target_tokens = load_and_tokenize(args.target_corpus)
-    target_tokens = target_tokens[:300000]
-    
-    print("Loading Neutral Corpus (WikiText)...")
-    neutral_dataset = get_neutral_corpus(split="train")
-    neutral_text = "\n".join(neutral_dataset["text"][:2000])
-    neutral_tokens = model.tokenizer.encode(neutral_text)[:300000]
-    
-    # 4. Get Feature Statistics
-    def get_feature_stats(tokens):
-        """Compute mean activation and sparsity for each feature."""
-        feature_acts_sum = torch.zeros(sae.d_sae, device=device)
-        feature_active_count = torch.zeros(sae.d_sae, device=device)
-        total_tokens = 0
-        
-        tokens_tensor = torch.tensor(tokens, device=device).unsqueeze(0)
-        
-        print(f"Processing {tokens_tensor.shape[1]} tokens in chunks of 256...")
-        for i in tqdm(range(0, tokens_tensor.shape[1], 256)):
-            chunk = tokens_tensor[:, i : i + 256]
-            if chunk.shape[1] == 0:
-                continue
-                
-            with torch.no_grad():
-                _, cache = model.run_with_cache(chunk, stop_at_layer=args.layer + 1)
+    target_tokens = target_tokens[: args.max_tokens]
+
+    print("Loading Neutral Corpus (Wiki + Fiction)...")
+    neutral_list = get_neutral_corpus(split="train")
+    neutral_text = "\n".join(
+        neutral_list[:4000]
+    )  # Take more samples for broader coverage
+    neutral_tokens = model.tokenizer.encode(neutral_text)[: args.max_tokens]
+
+    def get_feature_stats(tokens, batch_size=8, ctx_len=128):
+        """
+        Compute per-feature statistics using the FULL forward pass (not just encode).
+        Returns:
+          - activation_frequency: fraction of tokens where feature > 0
+          - mean_activation: mean activation value (over tokens where feature > 0)
+        """
+        feature_fire_count = torch.zeros(sae.d_sae, device=device)
+        feature_act_sum = torch.zeros(sae.d_sae, device=device)
+        total_tokens_seen = 0
+
+        token_chunks = [
+            tokens[i : i + ctx_len]
+            for i in range(0, len(tokens) - ctx_len + 1, ctx_len)
+        ]
+
+        clean_batches = []
+        for i in range(0, len(token_chunks), batch_size):
+            batch = token_chunks[i : i + batch_size]
+            if len(batch) > 0:
+                try:
+                    tensor_batch = torch.tensor(batch).to(device)
+                    if tensor_batch.ndim == 1:
+                        tensor_batch = tensor_batch.unsqueeze(0)
+                    if tensor_batch.shape[1] == ctx_len:
+                        clean_batches.append(tensor_batch)
+                except:
+                    pass
+
+        print(f"  Processing {len(clean_batches)} batches...")
+        with torch.no_grad():
+            for batch in tqdm(clean_batches, desc="  Features"):
+                # Run model to get activations
+                _, cache = model.run_with_cache(batch, stop_at_layer=args.layer + 1)
                 acts = cache[f"blocks.{args.layer}.hook_resid_post"]
-                features = sae.encode(acts)
-                
-                features = einops.rearrange(features, "b s d -> (b s) d")
-                feature_acts_sum += features.sum(dim=0)
-                feature_active_count += (features > 0).float().sum(dim=0)
-                total_tokens += features.shape[0]
-                
-                del cache
-                torch.cuda.empty_cache()
-                
-        mean_activation = feature_acts_sum / total_tokens
-        sparsity = feature_active_count / total_tokens
-        
-        return mean_activation, sparsity
-    
-    print("Computing Target Feature Statistics...")
-    target_mean, target_sparsity = get_feature_stats(target_tokens)
-    
-    print("Computing Neutral Feature Statistics...")
-    neutral_mean, neutral_sparsity = get_feature_stats(neutral_tokens)
-    
-    if args.method == "sparsity":
-        print(f"\nUsing SPARSITY-based feature selection (retain_threshold={args.retain_threshold})")
-        
-        # Features that rarely fire on neutral corpus but fire on target
-        valid_mask = neutral_sparsity < args.retain_threshold
-        
-        # Among valid features, sort by target sparsity (descending)
-        target_sparsity_masked = torch.where(valid_mask, target_sparsity, torch.tensor(-1.0, device=device))
-        top_vals, top_inds = torch.topk(target_sparsity_masked, k=args.num_features)
-        
-        print("\nTop Features (sparsity-based):")
-        print(f"{'Feature':<10} {'Target Sparsity':<18} {'Neutral Sparsity':<18}")
-        print("-" * 46)
-        for i in range(args.num_features):
-            idx = top_inds[i].item()
-            print(f"{idx:<10} {target_sparsity[idx].item():.6f}         {neutral_sparsity[idx].item():.6f}")
+
+                _, z_sparse = sae(acts)
+                # z_sparse shape: [batch, seq, d_sae]
+
+                z_flat = einops.rearrange(z_sparse, "b s d -> (b s) d")
+
+                # Activation frequency: how often does each feature fire (> 0)?
+                fired = (z_flat > 0).float()
+                feature_fire_count += fired.sum(dim=0)
+
+                # Mean activation (sum of activations for computing mean later)
+                feature_act_sum += z_flat.sum(dim=0)
+
+                total_tokens_seen += z_flat.shape[0]
+
+        activation_freq = feature_fire_count / total_tokens_seen
+        mean_activation = feature_act_sum / (
+            feature_fire_count + 1e-8
+        )  # mean over firing tokens only
+
+        return activation_freq, mean_activation, total_tokens_seen
+
+    print("\nComputing Target Feature Statistics...")
+    target_freq, target_mean_act, target_count = get_feature_stats(target_tokens)
+
+    print("\nComputing Neutral Feature Statistics...")
+    neutral_freq, neutral_mean_act, neutral_count = get_feature_stats(neutral_tokens)
+
+    # Compute Specificity Ratio: how much more likely is it to fire on target?
+    # Use a small epsilon to avoid div by zero
+    specificity_ratio = target_freq / (neutral_freq + 1e-6)
+
+    # Filter: avoid syntactic/common features that fire too often in general
+    # Generic features break the model's grammar if ablated.
+    # Stricter neutral_freq filter for high expansion SAEs
+    max_neutral_freq = args.max_neutral_freq
+    max_freq = args.max_freq
+
+    # valid_mask requires minimum frequency on target and maximum on neutral
+    # PLUS a minimum specificity ratio
+    valid_mask = (
+        (target_freq > args.min_freq)
+        & (neutral_freq < max_neutral_freq)
+        & (target_freq < max_freq)
+        & (specificity_ratio > args.min_ratio)
+    )
+
+    # Metric: freq_diff is good, but let's also weight by specificity
+    # We want features that are BOTH high-diff AND high-ratio
+    freq_diff = target_freq - neutral_freq
+    score = freq_diff * torch.log1p(specificity_ratio)
+
+    # Sort selection
+    if args.sort_by == "ratio":
+        selection_metric = specificity_ratio.clone()
+    elif args.sort_by == "score":
+        selection_metric = score.clone()
     else:
-        print("\nUsing DIFFERENCE-IN-MEANS feature selection")
-        diff = target_mean - neutral_mean
-        top_vals, top_inds = torch.topk(diff, k=args.num_features)
-        
-        print("\nTop Features (difference-in-means):")
-        for i in range(args.num_features):
-            print(f"Feature {top_inds[i].item()}: Diff = {top_vals[i].item():.4f}")
-        
-    # Save results
-    save_path = f"results/{args.model.replace('/', '_')}_layer_{args.layer}_features.pt"
+        selection_metric = freq_diff.clone()
+
+    selection_metric[~valid_mask] = -float("inf")
+
+    top_vals, top_inds = torch.topk(selection_metric, k=args.num_features)
+
+    print(f"\n{'=' * 70}")
+    print(f"Top {args.num_features} Harry Potter-specific features (by score):")
+    print(
+        f"{'Index':>10} | {'Score':>10} | {'Target Freq':>12} | {'Neut Freq':>12} | {'Ratio':>10}"
+    )
+    print("-" * 70)
+    for i in range(args.num_features):
+        idx = top_inds[i].item()
+        val = top_vals[i].item()
+        t_f = target_freq[idx].item()
+        n_f = neutral_freq[idx].item()
+        ratio = specificity_ratio[idx].item()
+        print(f"{idx:10} | {val:10.4f} | {t_f:12.4f} | {n_f:12.4f} | {ratio:10.1f}")
+
+    # 7. Save results (indices, frequency data, and mean activations for ablation)
+    save_path = f"results/layer_{args.layer}_features.pt"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save({
-        "indices": top_inds, 
-        "values": top_vals,
-        "method": args.method,
-        "model": args.model,
-        "layer": args.layer,
-        "target_sparsity": target_sparsity[top_inds] if args.method == "sparsity" else None,
-        "neutral_sparsity": neutral_sparsity[top_inds] if args.method == "sparsity" else None,
-    }, save_path)
+    torch.save(
+        {
+            "indices": top_inds,
+            "freq_diff": top_vals,
+            "target_freq": target_freq,
+            "neutral_freq": neutral_freq,
+            "target_mean_activation": target_mean_act,
+            "neutral_mean_activation": neutral_mean_act,
+        },
+        save_path,
+    )
     print(f"\nSaved selected features to {save_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="gpt2-small",
-                        help="Model to use (gpt2-small, gemma-2b, etc.)")
-    parser.add_argument("--layer", type=int, default=8)
-    parser.add_argument("--target_corpus", type=str, default="src/data/target_corpus.txt")
+    parser.add_argument("--layer", type=int, default=12)
+    parser.add_argument(
+        "--model_name", type=str, default="gpt2-medium", help="Model name to load"
+    )
+    parser.add_argument(
+        "--target_corpus", type=str, default="src/data/target_corpus.txt"
+    )
     parser.add_argument("--expansion_factor", type=int, default=16)
     parser.add_argument("--k", type=int, default=32)
     parser.add_argument("--num_features", type=int, default=20)
-    parser.add_argument("--method", type=str, default="sparsity", choices=["sparsity", "diff_means"])
-    parser.add_argument("--retain_threshold", type=float, default=0.01)
+    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument(
+        "--max_tokens", type=int, default=300000, help="Max tokens from each corpus"
+    )
+    parser.add_argument(
+        "--min_freq",
+        type=float,
+        default=0.001,
+        help="Min activation frequency on target",
+    )
+    parser.add_argument(
+        "--max_neutral_freq",
+        type=float,
+        default=0.005,
+        help="Max activation frequency on neutral corpus",
+    )
+    parser.add_argument(
+        "--max_freq", type=float, default=0.2, help="Max activation frequency overall"
+    )
+    parser.add_argument(
+        "--min_ratio",
+        type=float,
+        default=20.0,
+        help="Minimum specificity ratio (target/neutral)",
+    )
+    parser.add_argument(
+        "--sort_by", type=str, choices=["ratio", "score", "diff"], default="ratio"
+    )
     args = parser.parse_args()
     analyze(args)
 

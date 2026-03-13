@@ -2,51 +2,54 @@ import torch
 torch.set_default_dtype(torch.float16)
 from jaxtyping import Float
 
-def get_ablation_hook(sae, feature_indices_to_ablate, clamp_value=-20.0):
+
+def get_ablation_hook(
+    sae, feature_indices_to_ablate, mean_activations=None, scale=-5.0
+):
     """
-    Returns a hook function that intervenes on specific SAE features.
-    
-    Uses negative clamping (from inspiration paper) instead of zeroing:
-    - When a target feature activates (> 0), clamp it to a negative value
-    - This preserves model perplexity better than zeroing
-    
+    Returns a hook function that ablates specific features using the SAE.
+
+    This uses CONDITIONAL NEGATIVE SCALING: if a targeted feature fires,
+    we explicitly invert and amplify its activation (e.g., scale * z_sparse).
+    This actively suppresses the feature's contribution ONLY on tokens
+    where it tries to activate, preserving general capabilities (perplexity)
+    unlike unconditional steering.
+
     Args:
-        sae: The trained SAE model
-        feature_indices_to_ablate: List/tensor of feature indices to intervene on
-        clamp_value: Negative value to clamp activating features to (default: -20)
+        sae: The trained Sparse Autoencoder
+        feature_indices_to_ablate: Tensor of feature indices to ablate
+        mean_activations: (Unused in this updated method, kept for signature compatibility)
+        scale: Scaling factor. 0.0 means standard zero-ablation.
+               -5.0 means conditional negative steering.
     """
+
     def hook(activation: Float[torch.Tensor, "batch seq d_model"], hook):
         # Activation shape: [batch, seq, d_model]
-        
-        # Clone to avoid in-place errors
         original_act = activation.clone()
-        
-        # Get SAE reconstruction and sparse activations
+
+        # forward pass through SAE
         x_reconstruct, z_sparse = sae(activation)
-        
-        # Clone for modification
-        z_modified = z_sparse.clone()
-        
-        # NEGATIVE CLAMPING (inspiration paper approach):
-        # Only clamp features that are activating (> 0) to negative value
-        # This preserves more model capability than zeroing
-        target_features = z_sparse[:, :, feature_indices_to_ablate]
-        mask = target_features > 0
-        
-        # Apply clamping: set to clamp_value where feature activates, else keep at 0
-        z_modified[:, :, feature_indices_to_ablate] = torch.where(
-            mask,
-            torch.full_like(target_features, clamp_value),
-            target_features  # Keep original (usually 0 from TopK sparsity)
-        )
-        
-        # Decode with modified features
-        x_modified_recon = z_modified @ sae.W_dec + sae.b_dec
-        
-        # Preserve the reconstruction error (what SAE didn't capture)
+
+        z_ablated = z_sparse.clone()
+
+        if scale == 0.0:
+            z_ablated[..., feature_indices_to_ablate] = 0.0
+        else:
+            # Only modify tokens where the feature actually fired
+            target_acts = z_sparse[..., feature_indices_to_ablate]
+            fired_mask = target_acts > 0
+
+            z_ablated[..., feature_indices_to_ablate] = torch.where(
+                fired_mask, target_acts * scale, 0.0
+            )
+
+        # decode the ablated activations
+        x_ablated_recon = z_ablated @ sae.W_dec + sae.b_dec
+
+        # peserve the SAE reconstruction error
         error = original_act - x_reconstruct
-        modified_act = x_modified_recon + error
-        
+        modified_act = x_ablated_recon + error
+
         return modified_act
-        
+
     return hook
