@@ -2,6 +2,14 @@
 
 Course Project for *Introduction to Natural Language Processing (INLP)*, IIIT Hyderabad
 
+
+## Team
+
+- Jayant Gupta
+- Gopal Kataria
+- Manas Agrawal 
+- Mohammad Akmal Ali 
+
 ## Table of Contents
 
 - [Project Overview](#project-overview)
@@ -16,7 +24,6 @@ Course Project for *Introduction to Natural Language Processing (INLP)*, IIIT Hy
 - [Evaluation](#evaluation)
 - [Results](#results)
 - [Repository Structure](#repository-structure)
-- [Team](#team)
 - [Acknowledgments](#acknowledgments)
 
 ---
@@ -32,6 +39,8 @@ The approach focuses on identifying high-level features in the residual stream o
 ---
 
 ## Running the Project
+
+Pretrained model is available in [drive link](https://drive.google.com/drive/folders/1-bFWjPwdDisxIkyIrfjX_ulYnhmD0wJJ?usp=sharing)
 
 ### Installation
 
@@ -201,13 +210,6 @@ task.md             # Internal development notes
 ```
 
 ---
-
-## Team
-
-Jayant Gupta
-Gopal Kataria
-Manas Agrawal 
-Mohammad Akmal Ali 
 
 ---
 
