@@ -27,10 +27,10 @@ LAYER = 12
 K = 32
 EXPANSION = 16
 ABLATION_SCALE = -3.0
-MAX_NEW_TOKENS = 120
+MAX_NEW_TOKENS = 80
+TEMPERATURE = 0.3
 TOP_P = 0.9
-TEMPERATURE = 0.7
-FREQ_PENALTY = 1.0
+FREQ_PENALTY = 1.5
 
 
 # Model Manager
@@ -57,7 +57,6 @@ class ModelManager:
             status_cb("Loading SAE...")
             d_model = self.model.cfg.d_model
             sae = TopKSAE(d_in=d_model, d_sae=d_model * EXPANSION, k=K)
-
             state = torch.load(SAE_PATH, map_location=self.device, weights_only=True)
             sae.load_state_dict(state)
             self.sae = sae.float().to(self.device).eval()
@@ -77,8 +76,6 @@ class ModelManager:
 
     def generate(self, prompt: str) -> str:
         tokens = self.model.to_tokens(prompt).to(self.device)
-
-        torch.manual_seed(42)
 
         gen_kwargs = dict(
             max_new_tokens=MAX_NEW_TOKENS,
@@ -129,7 +126,6 @@ class ChatMessage(Static):
             name = " LLM [ABLATED] " if self.ablated else " LLM "
             text.append(name, style="bold yellow on black")
             text.append(f" {self.content}", style="grey70")
-
         yield Static(text)
 
 
@@ -154,18 +150,15 @@ class Demo(App):
         text-align: center;
     }
 
-    /* Ablation banner — hidden by default */
     #ablation-banner {
-        height: 1;
+        height: 0;
         background: #FF6B2B;
         color: white;
         text-align: center;
-        display: none;
     }
 
-    /* Shown when ablation is active */
     #ablation-banner.active {
-        display: block;
+        height: 1;
     }
 
     #chat { height: 1fr; padding: 1; }
@@ -174,6 +167,7 @@ class Demo(App):
         height: 3;
         background: #1A1A1A;
         padding: 0 1;
+        layout: horizontal;
     }
 
     Input {
@@ -182,7 +176,6 @@ class Demo(App):
         border: solid #3A3A3A;
     }
 
-    /* Active input border turns orange when ablation is on */
     Input.ablating {
         border: solid #FF6B2B;
     }
@@ -195,15 +188,17 @@ class Demo(App):
     #send {
         background: #FFD700;
         color: black;
+        width: 8;
     }
 
-    #toggle {
+    #btn-ablation {
         background: #2A2A2A;
-        color: #666666;
+        color: #888888;
         border: solid #3A3A3A;
+        width: 16;
     }
 
-    #toggle.on {
+    #btn-ablation.on {
         background: #FF6B2B;
         color: white;
         border: solid #FF9900;
@@ -219,31 +214,22 @@ class Demo(App):
 
     BINDINGS = [
         ("ctrl+s", "send_message", "Send"),
-        ("ctrl+a", "toggle_ablation", "Toggle Ablation"),
         ("ctrl+q", "quit", "Quit"),
     ]
-
-    def action_toggle_ablation(self):
-        self.toggle_ablation()
 
     def action_send_message(self):
         self.send()
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(
-            "Ctrl+S Send | Ctrl+A Toggle Ablation | Ctrl+Q Quit",
-            id="legend",
-        )
+        yield Static("Ctrl+S Send | Ctrl+Q Quit", id="legend")
         yield Static("Loading...", id="status")
         yield Static("[ ABLATION ACTIVE ]", id="ablation-banner")
         yield ScrollableContainer(id="chat")
-
         with Container(id="input-bar"):
             yield Input(placeholder="Type prompt...", id="input")
             yield Button("Send", id="send", disabled=True)
-            yield Button("Ablation OFF", id="toggle")
-
+            yield Button("Ablation: OFF", id="btn-ablation")
         yield Footer()
 
     def on_mount(self):
@@ -261,29 +247,33 @@ class Demo(App):
     def ready_ui(self):
         self.query_one("#send").disabled = False
 
-    @on(Button.Pressed, "#toggle")
-    def toggle_ablation(self):
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "send":
+            self.send()
+        elif event.button.id == "btn-ablation":
+            self.flip_ablation()
+
+    def flip_ablation(self):
         self.ablation_on = not self.ablation_on
         self.mgr.ablation = self.ablation_on
 
-        btn = self.query_one("#toggle")
+        btn = self.query_one("#btn-ablation")
         banner = self.query_one("#ablation-banner")
         inp = self.query_one("#input", Input)
 
         if self.ablation_on:
-            btn.label = "Ablation ON"
+            btn.label = "Ablation: ON"
             btn.add_class("on")
             banner.add_class("active")
             inp.add_class("ablating")
             self.query_one("#status").update("Ablation ACTIVE")
         else:
-            btn.label = "Ablation OFF"
+            btn.label = "Ablation: OFF"
             btn.remove_class("on")
             banner.remove_class("active")
             inp.remove_class("ablating")
             self.query_one("#status").update("Ablation OFF")
 
-    @on(Button.Pressed, "#send")
     @on(Input.Submitted, "#input")
     def send(self):
         if self.generating or not self.mgr.ready:
@@ -296,10 +286,8 @@ class Demo(App):
 
         inp.value = ""
         self.add_msg("user", text)
-
         self.generating = True
         self.query_one("#send").disabled = True
-
         self.generate_async(text)
 
     @work(thread=True)
