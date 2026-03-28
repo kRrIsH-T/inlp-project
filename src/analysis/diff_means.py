@@ -10,9 +10,10 @@ from tqdm import tqdm
 from transformer_lens import HookedTransformer
 
 from src.data.preprocess import get_neutral_corpus, load_and_tokenize
+from src.models.hf_loader import load_quantized_causal_lm
 from src.models.llama_loader import load_llama
-from src.sae.checkpoints import load_sae_checkpoint
-from src.sae.model import TopKSAE
+from src.sae.checkpoints import inspect_sae_checkpoint, load_sae_checkpoint, load_sae_config
+from src.sae.model import ReLUSAE, TopKSAE
 
 
 def analyze(args):
@@ -20,15 +21,16 @@ def analyze(args):
     sae_device = args.sae_device
 
     print(f"Loading {args.model_family} model: {args.model_name}...")
-    if args.model_family == "llama":
-        model, tokenizer = load_llama(
+    if args.model_family in {"llama", "gemma", "mistral"}:
+        loader = load_llama if args.model_family == "llama" else load_quantized_causal_lm
+        model, tokenizer = loader(
             model_name=args.model_name,
             quantize=args.quantize,
             device_map=args.device_map,
             use_cache=False,
         )
         d_model = model.config.hidden_size
-        model_family = "llama"
+        model_family = args.model_family
     else:
         model = HookedTransformer.from_pretrained(args.model_name, device=model_device)
         tokenizer = model.tokenizer
@@ -36,15 +38,56 @@ def analyze(args):
         model_family = "gpt2"
 
     print(f"Loading SAE for Layer {args.layer}...")
-    d_sae = d_model * args.expansion_factor
-    sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k)
 
-    ckpt_prefix = "checkpoints/llama" if model_family == "llama" else "checkpoints"
-    checkpoint_path = f"{ckpt_prefix}/sae_layer_{args.layer}.pt"
+    ckpt_prefix = (
+        "checkpoints/llama"
+        if model_family == "llama"
+        else "checkpoints/gemma"
+        if model_family == "gemma"
+        else "checkpoints/mistral"
+        if model_family == "mistral"
+        else "checkpoints"
+    )
+    checkpoint_path = args.checkpoint_path or f"{ckpt_prefix}/sae_layer_{args.layer}.pt"
     if not os.path.exists(checkpoint_path):
         print(f"Error: Checkpoint {checkpoint_path} not found.")
         return
 
+    checkpoint_info = inspect_sae_checkpoint(checkpoint_path, map_location="cpu")
+    sae_cfg = load_sae_config(args.sae_cfg_path)
+    if checkpoint_info["d_in"] != d_model:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} expects SAE input width {checkpoint_info['d_in']}, "
+            f"but model {args.model_name} exposes hidden size {d_model}. "
+            "Use the backbone model that matches the converted SAE checkpoint. "
+            "For Gemma Scope conversions this is often `google/gemma-2-2b`, not `google/gemma-2b`."
+        )
+
+    d_sae = checkpoint_info["d_sae"]
+    if args.expansion_factor is not None and d_model * args.expansion_factor != d_sae:
+        print(
+            f"Warning: checkpoint width d_sae={d_sae} does not match "
+            f"d_model * expansion_factor = {d_model * args.expansion_factor}. "
+            "Using checkpoint dimensions."
+        )
+
+    print(
+        f"Checkpoint dimensions: d_in={checkpoint_info['d_in']}, d_sae={d_sae}, k={args.k}"
+    )
+    activation_fn = sae_cfg.get("activation_fn_str", "topk")
+    if activation_fn == "relu":
+        apply_b_dec_to_input = bool(sae_cfg.get("apply_b_dec_to_input", False))
+        print(
+            f"SAE architecture: relu | apply_b_dec_to_input={apply_b_dec_to_input}"
+        )
+        sae = ReLUSAE(
+            d_in=d_model,
+            d_sae=d_sae,
+            apply_b_dec_to_input=apply_b_dec_to_input,
+        )
+    else:
+        print(f"SAE architecture: topk | k={args.k}")
+        sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k)
     load_sae_checkpoint(checkpoint_path, sae, map_location=sae_device)
     sae.to(sae_device)
     sae.eval()
@@ -91,14 +134,20 @@ def analyze(args):
                     _, cache = model.run_with_cache(
                         batch.to(model_device), stop_at_layer=args.layer + 1
                     )
-                    acts = cache[f"blocks.{args.layer}.hook_resid_post"].float().to(sae_device)
+                    hook_name = (
+                        f"blocks.{args.layer}.hook_resid_pre"
+                        if args.hook_position == "pre"
+                        else f"blocks.{args.layer}.hook_resid_post"
+                    )
+                    acts = cache[hook_name].float().to(sae_device)
                 else:
                     outputs = model(
                         batch.to(model_device),
                         output_hidden_states=True,
                         use_cache=False,
                     )
-                    acts = outputs.hidden_states[args.layer + 1].float().to(sae_device)
+                    hidden_state_idx = args.layer if args.hook_position == "pre" else args.layer + 1
+                    acts = outputs.hidden_states[hidden_state_idx].float().to(sae_device)
 
                 _, z_sparse = sae(acts)
                 z_flat = einops.rearrange(z_sparse, "b s d -> (b s) d")
@@ -185,9 +234,17 @@ def analyze(args):
             f"{idx:10} | {val:10.4f} | {t_f:12.4f} | {n_f:12.4f} | {ratio:10.2f} | {t_cnt:8d} | {n_cnt:8d}"
         )
 
-    save_dir = "results/llama" if model_family == "llama" else "results"
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = f"{save_dir}/layer_{args.layer}_features.pt"
+    save_dir = (
+        "results/llama"
+        if model_family == "llama"
+        else "results/gemma"
+        if model_family == "gemma"
+        else "results/mistral"
+        if model_family == "mistral"
+        else "results"
+    )
+    save_path = args.features_output_path or f"{save_dir}/layer_{args.layer}_features.pt"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(
         {
             "indices": top_inds,
@@ -216,7 +273,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_family",
         type=str,
-        choices=["llama", "gpt2"],
+        choices=["llama", "gemma", "mistral", "gpt2"],
         default="llama",
         help="Model family to load",
     )
@@ -232,8 +289,33 @@ if __name__ == "__main__":
     parser.add_argument(
         "--target_corpus", type=str, default="src/data/target_corpus.txt"
     )
-    parser.add_argument("--expansion_factor", type=int, default=4)
+    parser.add_argument(
+        "--hook_position",
+        type=str,
+        choices=["pre", "post"],
+        default="post",
+        help="Whether the SAE is attached to residual stream activations before or after the layer.",
+    )
+    parser.add_argument("--expansion_factor", type=int, default=None)
     parser.add_argument("--k", type=int, default=8)
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Optional explicit SAE checkpoint path.",
+    )
+    parser.add_argument(
+        "--sae_cfg_path",
+        type=str,
+        default=None,
+        help="Optional external SAE config json path.",
+    )
+    parser.add_argument(
+        "--features_output_path",
+        type=str,
+        default=None,
+        help="Optional explicit output path for selected features.",
+    )
     parser.add_argument("--num_features", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(

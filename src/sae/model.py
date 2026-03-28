@@ -83,3 +83,33 @@ class TopKSAE(nn.Module):
         aux_loss = F.mse_loss(error_recon, error.detach())
 
         return aux_loss
+
+
+class ReLUSAE(nn.Module):
+    def __init__(self, d_in, d_sae, apply_b_dec_to_input=False):
+        super().__init__()
+        self.d_in = d_in
+        self.d_sae = d_sae
+        self.apply_b_dec_to_input = apply_b_dec_to_input
+
+        self.W_dec = nn.Parameter(torch.empty(d_sae, d_in, dtype=torch.float32))
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=torch.float32))
+        self.W_enc = nn.Parameter(torch.empty(d_in, d_sae, dtype=torch.float32))
+        self.b_enc = nn.Parameter(torch.zeros(d_sae, dtype=torch.float32))
+
+        self.register_buffer(
+            "ticks_since_active", torch.zeros(d_sae, dtype=torch.float32)
+        )
+        self.register_buffer("total_steps", torch.tensor(0, dtype=torch.long))
+
+    def encode(self, x):
+        x = x.to(dtype=self.W_enc.dtype)
+        if self.apply_b_dec_to_input:
+            x = x - self.b_dec
+        return x @ self.W_enc + self.b_enc
+
+    def forward(self, x):
+        pre_acts = self.encode(x)
+        z_sparse = F.relu(pre_acts)
+        x_reconstruct = z_sparse @ self.W_dec + self.b_dec
+        return x_reconstruct, z_sparse

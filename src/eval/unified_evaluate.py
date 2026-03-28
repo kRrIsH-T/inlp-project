@@ -14,9 +14,10 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.intervention.hook import get_ablation_hook
+from src.models.hf_loader import load_quantized_causal_lm
 from src.models.llama_loader import load_llama
-from src.sae.checkpoints import load_sae_checkpoint
-from src.sae.model import TopKSAE
+from src.sae.checkpoints import inspect_sae_checkpoint, load_sae_checkpoint, load_sae_config
+from src.sae.model import ReLUSAE, TopKSAE
 
 # Configuration Constants
 
@@ -68,7 +69,6 @@ LOGPROB_TASKS = {
         "targets": [" London", " University", " President", " science", " history"],
     },
 }
-
 
 def get_paired_log_probs(model, tokenizer, prompts, targets, device):
     """Average per-token log-probability of full target strings given prompts."""
@@ -227,12 +227,22 @@ def run_evaluation(
     return results
 
 
-def register_llama_hook(model, layer_idx, hook_fn):
+def register_decoder_hook(model, layer_idx, hook_fn, hook_position="post"):
     """
     Register a forward hook on a specific decoder layer.
     Returns the handle so the caller can remove it via .remove().
     """
     target_layer = model.model.layers[layer_idx]
+
+    if hook_position == "pre":
+        def pre_wrapper(module, inputs):
+            hidden_states = inputs[0]
+            modified = hook_fn(hidden_states)
+            if len(inputs) == 1:
+                return (modified,)
+            return (modified,) + tuple(inputs[1:])
+
+        return target_layer.register_forward_pre_hook(pre_wrapper)
 
     def wrapper(module, inputs, output):
         hidden_states = output[0] if isinstance(output, tuple) else output
@@ -247,6 +257,13 @@ def register_llama_hook(model, layer_idx, hook_fn):
 def load_model_and_tokenizer(args):
     if args.model_family == "llama":
         return load_llama(
+            model_name=args.model_name,
+            quantize=args.quantize,
+            device_map=args.device_map,
+            use_cache=True,
+        )
+    if args.model_family in {"gemma", "mistral"}:
+        return load_quantized_causal_lm(
             model_name=args.model_name,
             quantize=args.quantize,
             device_map=args.device_map,
@@ -268,7 +285,7 @@ def main():
     parser.add_argument(
         "--model_family",
         type=str,
-        choices=["llama", "gpt2"],
+        choices=["llama", "gemma", "mistral", "gpt2"],
         default="llama",
         help="Model family to evaluate.",
     )
@@ -279,15 +296,40 @@ def main():
     parser.add_argument(
         "--quantize", type=str, choices=["4bit", "8bit", "none"], default="4bit"
     )
+    parser.add_argument(
+        "--hook_position",
+        type=str,
+        choices=["pre", "post"],
+        default="post",
+        help="Whether the SAE is attached to residual stream activations before or after the layer.",
+    )
     parser.add_argument("--layer", type=int, default=15)
     parser.add_argument("--num_features", type=int, default=50)
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Optional explicit SAE checkpoint path.",
+    )
+    parser.add_argument(
+        "--sae_cfg_path",
+        type=str,
+        default=None,
+        help="Optional external SAE config json path.",
+    )
+    parser.add_argument(
+        "--features_path",
+        type=str,
+        default=None,
+        help="Optional explicit selected-features path.",
+    )
     parser.add_argument(
         "--ablation_scale",
         type=float,
         default=-3.0,
         help="0.0 for zeroing, negative for counter-activation",
     )
-    parser.add_argument("--expansion_factor", type=int, default=4)
+    parser.add_argument("--expansion_factor", type=int, default=None)
     parser.add_argument("--k", type=int, default=8, help="TopK sparsity for SAE")
     parser.add_argument(
         "--limit", type=int, default=10, help="Number of prompts for match rate"
@@ -327,18 +369,68 @@ def main():
     )
 
     print(
-        f"\nLoading SAE (Layer {args.layer}, Exp {args.expansion_factor}) and ablating {args.num_features} features..."
+        f"\nLoading SAE (Layer {args.layer}, Exp {args.expansion_factor if args.expansion_factor is not None else 'auto'}) "
+        f"and ablating {args.num_features} features..."
     )
     d_model = model.config.hidden_size
-    d_sae = d_model * args.expansion_factor
-    sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k).to(args.sae_device)
 
-    ckpt_prefix = "checkpoints/llama" if args.model_family == "llama" else "checkpoints"
-    checkpoint_path = f"{ckpt_prefix}/sae_layer_{args.layer}.pt"
+    ckpt_prefix = (
+        "checkpoints/llama"
+        if args.model_family == "llama"
+        else "checkpoints/gemma"
+        if args.model_family == "gemma"
+        else "checkpoints/mistral"
+        if args.model_family == "mistral"
+        else "checkpoints"
+    )
+    checkpoint_path = args.checkpoint_path or f"{ckpt_prefix}/sae_layer_{args.layer}.pt"
+    checkpoint_info = inspect_sae_checkpoint(checkpoint_path, map_location="cpu")
+    sae_cfg = load_sae_config(args.sae_cfg_path)
+    if checkpoint_info["d_in"] != d_model:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} expects SAE input width {checkpoint_info['d_in']}, "
+            f"but model {args.model_name} exposes hidden size {d_model}. "
+            "Use the backbone model that matches the converted SAE checkpoint. "
+            "For Gemma Scope conversions this is often `google/gemma-2-2b`, not `google/gemma-2b`."
+        )
+
+    d_sae = checkpoint_info["d_sae"]
+    if args.expansion_factor is not None and d_model * args.expansion_factor != d_sae:
+        print(
+            f"Warning: checkpoint width d_sae={d_sae} does not match "
+            f"d_model * expansion_factor = {d_model * args.expansion_factor}. "
+            "Using checkpoint dimensions."
+        )
+
+    print(
+        f"Checkpoint dimensions: d_in={checkpoint_info['d_in']}, d_sae={d_sae}, k={args.k}"
+    )
+    activation_fn = sae_cfg.get("activation_fn_str", "topk")
+    if activation_fn == "relu":
+        apply_b_dec_to_input = bool(sae_cfg.get("apply_b_dec_to_input", False))
+        print(
+            f"SAE architecture: relu | apply_b_dec_to_input={apply_b_dec_to_input}"
+        )
+        sae = ReLUSAE(
+            d_in=d_model,
+            d_sae=d_sae,
+            apply_b_dec_to_input=apply_b_dec_to_input,
+        ).to(args.sae_device)
+    else:
+        print(f"SAE architecture: topk | k={args.k}")
+        sae = TopKSAE(d_in=d_model, d_sae=d_sae, k=args.k).to(args.sae_device)
     load_sae_checkpoint(checkpoint_path, sae, map_location=args.sae_device)
 
-    feat_prefix = "results/llama" if args.model_family == "llama" else "results"
-    features_path = f"{feat_prefix}/layer_{args.layer}_features.pt"
+    feat_prefix = (
+        "results/llama"
+        if args.model_family == "llama"
+        else "results/gemma"
+        if args.model_family == "gemma"
+        else "results/mistral"
+        if args.model_family == "mistral"
+        else "results"
+    )
+    features_path = args.features_path or f"{feat_prefix}/layer_{args.layer}_features.pt"
     features_data = torch.load(features_path, map_location=args.sae_device)
     feature_indices = features_data["indices"][: args.num_features]
     mean_activations = features_data.get("target_mean_activation", None)
@@ -357,24 +449,32 @@ def main():
     )
 
     print("--- Running Ablated Evaluation ---")
-    if args.model_family == "llama":
-        handle = register_llama_hook(model, args.layer, hook_fn)
+    if args.model_family in {"llama", "gemma", "mistral"}:
+        handle = register_decoder_hook(model, args.layer, hook_fn, hook_position=args.hook_position)
         ablated_results = run_evaluation(
             model, tokenizer, sae, hook_fn, args, eval_data, device, wiki_test
         )
         handle.remove()
     else:
-        # transformers GPT-2 hook on block output
         target_layer = model.transformer.h[args.layer]
+        if args.hook_position == "pre":
+            def gpt2_pre_wrapper(module, inputs):
+                hidden_states = inputs[0]
+                modified = hook_fn(hidden_states)
+                if len(inputs) == 1:
+                    return (modified,)
+                return (modified,) + tuple(inputs[1:])
 
-        def gpt2_wrapper(module, inputs, output):
-            hidden_states = output[0] if isinstance(output, tuple) else output
-            modified = hook_fn(hidden_states)
-            if isinstance(output, tuple):
-                return (modified,) + output[1:]
-            return modified
+            handle = target_layer.register_forward_pre_hook(gpt2_pre_wrapper)
+        else:
+            def gpt2_wrapper(module, inputs, output):
+                hidden_states = output[0] if isinstance(output, tuple) else output
+                modified = hook_fn(hidden_states)
+                if isinstance(output, tuple):
+                    return (modified,) + output[1:]
+                return modified
 
-        handle = target_layer.register_forward_hook(gpt2_wrapper)
+            handle = target_layer.register_forward_hook(gpt2_wrapper)
         ablated_results = run_evaluation(
             model, tokenizer, sae, hook_fn, args, eval_data, device, wiki_test
         )
@@ -481,7 +581,7 @@ def main():
             }
         )
 
-    out_dir = "results/llama" if args.model_family == "llama" else "results"
+    out_dir = feat_prefix
     os.makedirs(out_dir, exist_ok=True)
     output_path = f"{out_dir}/unified_eval_results.json"
     with open(output_path, "w") as f:
