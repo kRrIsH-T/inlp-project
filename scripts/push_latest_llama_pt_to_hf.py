@@ -10,7 +10,7 @@ from huggingface_hub.utils import get_token
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKPOINTS_DIR = ROOT / "checkpoints" / "llama"
-FEATURES_DIR = ROOT / "results" / "llama"
+FEATURES_DIR = ROOT / "features" / "llama"
 DEFAULT_REPO_NAME = "llama-hp-unlearning-artifacts"
 DEFAULT_REPO_TYPE = "model"
 DEFAULT_PRIVATE = False

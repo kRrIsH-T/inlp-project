@@ -14,6 +14,7 @@ from textual.containers import Container, ScrollableContainer
 from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, Static
 
+from src.helper import download_llama_artifacts
 from src.intervention.hook import get_ablation_hook
 from src.models.llama_loader import load_llama
 from src.sae.checkpoints import load_sae_checkpoint
@@ -142,6 +143,9 @@ class ModelManager:
             self.model = model
             self.tokenizer = tokenizer
             self.input_device = str(model.get_input_embeddings().weight.device)
+
+            # Auto-download SAE checkpoint + features if not present locally
+            download_llama_artifacts(ROOT, status_cb=status_cb)
 
             if SAE_PATH.exists() and FEATURES_PATH.exists():
                 try:
