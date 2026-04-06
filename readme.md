@@ -30,7 +30,7 @@ Course Project for *Introduction to Natural Language Processing (INLP)*, IIIT Hy
 
 ## Project Overview
 
-This project investigates selective knowledge removal in large language models through mechanistic interpretability techniques. The goal is to remove knowledge associated with the *Harry Potter* domain from a pretrained GPT-2 Medium model while preserving the model’s general linguistic and reasoning capabilities.
+This project investigates selective knowledge removal in large language models through mechanistic interpretability techniques. The goal is to remove knowledge associated with the *Harry Potter* domain from a pretrained llama-2-7b-chat model while preserving the model’s general linguistic and reasoning capabilities.
 
 Traditional approaches to model editing rely on gradient-based fine-tuning or parameter modification, which may introduce unintended side effects or degrade general performance. In contrast, this work employs **Sparse Autoencoders (SAEs)** trained on internal transformer activations to identify interpretable features corresponding to specific knowledge domains. By selectively ablating these features during inference, it becomes possible to remove targeted knowledge in a controlled and interpretable manner.
 
@@ -99,7 +99,7 @@ A combination of WikiText-2 and TinyStories is used as a baseline dataset. The i
 
 ### Sparse Autoencoder Training
 
-Sparse autoencoders are trained on the **residual stream activations of GPT-2 Medium at layer 12**. The autoencoder learns a sparse representation of activations using a Top-K activation constraint.
+Sparse autoencoders are trained on the **residual stream activations of llama-2-7b-chat  at layer 12**. The autoencoder learns a sparse representation of activations using a Top-K activation constraint.
 
 The goal of this representation is to decompose the residual stream into interpretable features that correspond to meaningful semantic patterns in the model’s internal computations.
 
@@ -154,23 +154,6 @@ Generated completions are manually inspected and optionally classified by an ext
 
 ---
 
-## Results
-
-Experiments were conducted using GPT-2 Medium with the top 100 Harry Potter-specific features identified at layer 12.
-
-
-| Metric | Baseline (Top-P) | Ablated ($-3.0$ Scale) | Impact |
-| :--- | :--- | :--- | :--- |
-| **HP Log-Probability** | $-3.6567$ | $-5.1248$ | **$-1.4681$ Shift (Massive Drop)** |
-| **Magic Log-Probability** | $-3.0521$ | $-3.1354$ | **Preserved ($-0.08$)** |
-| **Fantasy Log-Probability**| $-6.4321$ | $-6.8215$ | **Minor Collateral ($-0.39$)** |
-| **Real World Log-Prob** | $-3.9647$ | $-3.9692$ | **Unchanged (0.00)** |
-| **Degeneration Rate** | **0.0%** | **0.0%** | **Perfectly Stable** |
-| **WikiText-2 Perplexity** | 43.84 | 43.88 | **0.1% Degradation** |
-
-
-The ablated model typically avoids referencing Harry Potter entities and instead produces generic historical or geographical information when prompted with domain-specific queries.
-
 Detailled results can be found in project report link
 
 ---
@@ -206,7 +189,7 @@ Research on sparse autoencoders and mechanistic interpretability from the AI int
 
 ## Running the TUI Demo
 
-An interactive terminal demo (`demo.py`) lets you chat with GPT-2 Medium and toggle SAE-based Harry Potter knowledge ablation on/off in real time.
+An interactive terminal demo (`demo.py`) lets you chat with llama-2-7b-chat and toggle SAE-based Harry Potter knowledge ablation on/off in real time.
 
 ### Prerequisites
 
@@ -220,7 +203,7 @@ All other dependencies (`torch`, `transformer_lens`, `einops`, `jaxtyping`) are 
 
 On the **first run**, `demo.py` automatically:
 
-1. Loads **GPT-2 Medium** via TransformerLens.
+1. Loads **llama-2-7b-chat** via TransformerLens.
 2. Loads the pretrained SAE from **`sae_layer_12.pt`** in the project root.
 3. Runs a ~30-second fast diff-means pass to identify the top 100 Harry Potter-specific SAE features and caches them to `results/layer_12_features.pt`.
 
@@ -244,6 +227,6 @@ python demo.py
 
 ### What to Try
 
-- Ask **"Who is Harry Potter's best friend?"** with ablation **OFF** → normal answer.
-- Ask the same with ablation **ON** → model avoids HP-specific answers.
-- Ask a general question (history, science) with ablation ON → general capability is preserved.
+- Ask **"Who is Harry Potter's best friend?"** with ablation **OFF** -> normal answer.
+- Ask the same with ablation **ON** -> model avoids HP-specific answers.
+- Ask a general question (history, science) with ablation ON -> general capability is preserved.
